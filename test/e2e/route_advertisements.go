@@ -743,6 +743,34 @@ var _ = ginkgo.Describe("BGP: Pod to external server when CUDN network is advert
 				return condition.Reason
 			}, 30*time.Second, time.Second).Should(gomega.Equal("Accepted"))
 
+			// Check CUDN TransportAccepted condition is True after RA is created
+			if cudnTemplate.Spec.Network.Transport != "" && cudnTemplate.Spec.Network.Transport != udnv1.TransportOption("Geneve") {
+				ginkgo.By("ensure CUDN TransportAccepted condition is True")
+				gomega.Eventually(func(g gomega.Gomega) {
+					cudnObj, err := f.DynamicClient.Resource(clusterUDNGVR).Get(context.Background(), cUDN.Name, metav1.GetOptions{}, "status")
+					g.Expect(err).NotTo(gomega.HaveOccurred())
+					conditions, err := getConditions(cudnObj)
+					g.Expect(err).NotTo(gomega.HaveOccurred())
+					for _, condition := range conditions {
+						if condition.Type == "TransportAccepted" {
+							g.Expect(string(condition.Status)).To(gomega.Equal("True"))
+							g.Expect(condition.Message).To(gomega.Equal("Transport has been configured as 'no-overlay'."))
+							return
+						}
+					}
+					g.Expect(false).To(gomega.BeTrue(), "TransportAccepted condition not found in CUDN %s", cUDN.Name)
+				}, 30*time.Second, time.Second).Should(gomega.Succeed())
+
+				// TODO: remove this step after debugging; saves CUDN YAML for inspection
+				ginkgo.By("saving CUDN resource YAML for inspection")
+				cudnYAML, err := e2ekubectl.RunKubectl("", "get", "clusteruserdefinednetwork", cUDN.Name, "-o", "yaml")
+				if err == nil {
+					framework.Logf("CUDN %s YAML:\n%s", cUDN.Name, cudnYAML)
+				} else {
+					framework.Logf("Failed to get CUDN %s YAML: %v", cUDN.Name, err)
+				}
+			}
+
 			gomega.Expect(len(serverContainerIPs)).To(gomega.BeNumerically(">", 0))
 
 			// -----------------               ------------------                         ---------------------
@@ -805,7 +833,14 @@ var _ = ginkgo.Describe("BGP: Pod to external server when CUDN network is advert
 				}
 			}
 
-			ginkgo.By("queries to the external server are not SNATed (uses podIP)")
+			expectSNAT := cudnTemplate.Spec.Network.NoOverlay != nil &&
+				cudnTemplate.Spec.Network.NoOverlay.OutboundSNAT == udnv1.SNATEnabled
+
+			if expectSNAT {
+				ginkgo.By("queries to the external server are SNATed (uses node IP) since OutboundSNAT is enabled")
+			} else {
+				ginkgo.By("queries to the external server are not SNATed (uses podIP)")
+			}
 			for _, serverContainerIP := range serverContainerIPs {
 				podIP, err := getPodAnnotationIPsForAttachmentByIndex(f.ClientSet, f.Namespace.Name, clientPod.Name, namespacedName(f.Namespace.Name, cUDN.Name), 0)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -825,23 +860,35 @@ var _ = ginkgo.Describe("BGP: Pod to external server when CUDN network is advert
 					framework.Poll,
 					60*time.Second)
 				framework.ExpectNoError(err, fmt.Sprintf("Testing pod to external traffic failed: %v", err))
-				if isIPv6Supported(f.ClientSet) && utilnet.IsIPv6String(serverContainerIP) {
-					if isIPv4Supported(f.ClientSet) && isIPv6Supported(f.ClientSet) {
-						// for dualstack we need to fetch the IP at index1
-						// if singlestack IPV6 the original podIP at index0 is the correct one
-						// FIXME: This util call assumes the first index will always be the IPv4 address
-						// and second index will always be the IPv6 address
-						// which is not always the case.
-						podIP, err = getPodAnnotationIPsForAttachmentByIndex(f.ClientSet, f.Namespace.Name, clientPod.Name, namespacedName(f.Namespace.Name, cUDN.Name), 1)
+
+				if expectSNAT {
+					// When OutboundSNAT is enabled, traffic to external destinations
+					// is masqueraded to the node IP. Verify the source is NOT the pod IP.
+					sourceIP := strings.Split(stdout, ":")[0]
+					if isIPv6Supported(f.ClientSet) && utilnet.IsIPv6String(serverContainerIP) {
+						sourceIP = strings.TrimPrefix(strings.Split(stdout, "]:")[0], "[")
 					}
-					// For IPv6 addresses, need to handle the brackets in the output
-					outputIP := strings.TrimPrefix(strings.Split(stdout, "]:")[0], "[")
-					gomega.Expect(outputIP).To(gomega.Equal(podIP),
-						fmt.Sprintf("Testing pod %s to external traffic failed while analysing output %v", echoClientPodName, stdout))
+					gomega.Expect(sourceIP).NotTo(gomega.Equal(podIP),
+						fmt.Sprintf("Expected SNAT for pod %s but traffic was not SNATed, output: %v", echoClientPodName, stdout))
 				} else {
-					// Original IPv4 handling
-					gomega.Expect(strings.Split(stdout, ":")[0]).To(gomega.Equal(podIP),
-						fmt.Sprintf("Testing pod %s to external traffic failed while analysing output %v", echoClientPodName, stdout))
+					if isIPv6Supported(f.ClientSet) && utilnet.IsIPv6String(serverContainerIP) {
+						if isIPv4Supported(f.ClientSet) && isIPv6Supported(f.ClientSet) {
+							// for dualstack we need to fetch the IP at index1
+							// if singlestack IPV6 the original podIP at index0 is the correct one
+							// FIXME: This util call assumes the first index will always be the IPv4 address
+							// and second index will always be the IPv6 address
+							// which is not always the case.
+							podIP, err = getPodAnnotationIPsForAttachmentByIndex(f.ClientSet, f.Namespace.Name, clientPod.Name, namespacedName(f.Namespace.Name, cUDN.Name), 1)
+						}
+						// For IPv6 addresses, need to handle the brackets in the output
+						outputIP := strings.TrimPrefix(strings.Split(stdout, "]:")[0], "[")
+						gomega.Expect(outputIP).To(gomega.Equal(podIP),
+							fmt.Sprintf("Testing pod %s to external traffic failed while analysing output %v", echoClientPodName, stdout))
+					} else {
+						// Original IPv4 handling
+						gomega.Expect(strings.Split(stdout, ":")[0]).To(gomega.Equal(podIP),
+							fmt.Sprintf("Testing pod %s to external traffic failed while analysing output %v", echoClientPodName, stdout))
+					}
 				}
 			}
 		},
@@ -878,6 +925,208 @@ var _ = ginkgo.Describe("BGP: Pod to external server when CUDN network is advert
 							ClusterUserDefinedNetworkSelector: &apitypes.ClusterUserDefinedNetworkSelector{
 								NetworkSelector: metav1.LabelSelector{
 									MatchLabels: map[string]string{"bgp-udn-layer3-network": ""},
+								},
+							},
+						},
+					},
+					NodeSelector:             metav1.LabelSelector{},
+					FRRConfigurationSelector: metav1.LabelSelector{},
+					Advertisements: []rav1.AdvertisementType{
+						rav1.PodNetwork,
+					},
+				},
+			},
+		),
+		// TODO: uncomment when managed routing is supported
+		ginkgo.PEntry("layer3 no-overlay SNAT enabled managed routing", ginkgo.Label("no-overlay"),
+			&udnv1.ClusterUserDefinedNetwork{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "bgp-udn-layer3-no-overlay-snat-enabled-managed-",
+					Labels:       map[string]string{"bgp-udn-layer3-no-overlay-snat-enabled-managed": ""},
+				},
+				Spec: udnv1.ClusterUserDefinedNetworkSpec{
+					Network: udnv1.NetworkSpec{
+						Topology: udnv1.NetworkTopologyLayer3,
+						Layer3: &udnv1.Layer3Config{
+							Role: "Primary",
+							Subnets: []udnv1.Layer3Subnet{{
+								CIDR:       "103.103.0.0/16",
+								HostSubnet: 24,
+							}, {
+								CIDR:       "2014:100:200::0/60",
+								HostSubnet: 64,
+							}},
+						},
+						Transport: udnv1.TransportOptionNoOverlay,
+						NoOverlay: &udnv1.NoOverlayConfig{
+							OutboundSNAT: udnv1.SNATEnabled,
+							Routing:      udnv1.RoutingManaged,
+						},
+					},
+				},
+			},
+			&rav1.RouteAdvertisements{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "bgp-udn-layer3-no-overlay-snat-enabled-managed-ra",
+				},
+				Spec: rav1.RouteAdvertisementsSpec{
+					NetworkSelectors: apitypes.NetworkSelectors{
+						apitypes.NetworkSelector{
+							NetworkSelectionType: apitypes.ClusterUserDefinedNetworks,
+							ClusterUserDefinedNetworkSelector: &apitypes.ClusterUserDefinedNetworkSelector{
+								NetworkSelector: metav1.LabelSelector{
+									MatchLabels: map[string]string{"bgp-udn-layer3-no-overlay-snat-enabled-managed": ""},
+								},
+							},
+						},
+					},
+					NodeSelector:             metav1.LabelSelector{},
+					FRRConfigurationSelector: metav1.LabelSelector{},
+					Advertisements: []rav1.AdvertisementType{
+						rav1.PodNetwork,
+					},
+				},
+			},
+		),
+		ginkgo.Entry("layer3 no-overlay SNAT enabled unmanaged routing", ginkgo.Label("no-overlay"),
+			&udnv1.ClusterUserDefinedNetwork{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "bgp-udn-layer3-no-overlay-snat-enabled-unmanaged-",
+					Labels:       map[string]string{"bgp-udn-layer3-no-overlay-snat-enabled-unmanaged": ""},
+				},
+				Spec: udnv1.ClusterUserDefinedNetworkSpec{
+					Network: udnv1.NetworkSpec{
+						Topology: udnv1.NetworkTopologyLayer3,
+						Layer3: &udnv1.Layer3Config{
+							Role: "Primary",
+							Subnets: []udnv1.Layer3Subnet{{
+								CIDR:       "103.103.0.0/16",
+								HostSubnet: 24,
+							}, {
+								CIDR:       "2014:100:200::0/60",
+								HostSubnet: 64,
+							}},
+						},
+						Transport: udnv1.TransportOptionNoOverlay,
+						NoOverlay: &udnv1.NoOverlayConfig{
+							OutboundSNAT: udnv1.SNATEnabled,
+							Routing:      udnv1.RoutingUnmanaged,
+						},
+					},
+				},
+			},
+			&rav1.RouteAdvertisements{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "bgp-udn-layer3-no-overlay-snat-enabled-unmanaged-ra",
+				},
+				Spec: rav1.RouteAdvertisementsSpec{
+					NetworkSelectors: apitypes.NetworkSelectors{
+						apitypes.NetworkSelector{
+							NetworkSelectionType: apitypes.ClusterUserDefinedNetworks,
+							ClusterUserDefinedNetworkSelector: &apitypes.ClusterUserDefinedNetworkSelector{
+								NetworkSelector: metav1.LabelSelector{
+									MatchLabels: map[string]string{"bgp-udn-layer3-no-overlay-snat-enabled-unmanaged": ""},
+								},
+							},
+						},
+					},
+					NodeSelector:             metav1.LabelSelector{},
+					FRRConfigurationSelector: metav1.LabelSelector{},
+					Advertisements: []rav1.AdvertisementType{
+						rav1.PodNetwork,
+					},
+				},
+			},
+		),
+		// TODO: uncomment when managed routing is supported
+		ginkgo.PEntry("layer3 no-overlay SNAT disabled managed routing", ginkgo.Label("no-overlay"),
+			&udnv1.ClusterUserDefinedNetwork{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "bgp-udn-layer3-no-overlay-snat-disabled-managed-",
+					Labels:       map[string]string{"bgp-udn-layer3-no-overlay-snat-disabled-managed": ""},
+				},
+				Spec: udnv1.ClusterUserDefinedNetworkSpec{
+					Network: udnv1.NetworkSpec{
+						Topology: udnv1.NetworkTopologyLayer3,
+						Layer3: &udnv1.Layer3Config{
+							Role: "Primary",
+							Subnets: []udnv1.Layer3Subnet{{
+								CIDR:       "103.103.0.0/16",
+								HostSubnet: 24,
+							}, {
+								CIDR:       "2014:100:200::0/60",
+								HostSubnet: 64,
+							}},
+						},
+						Transport: udnv1.TransportOptionNoOverlay,
+						NoOverlay: &udnv1.NoOverlayConfig{
+							OutboundSNAT: udnv1.SNATDisabled,
+							Routing:      udnv1.RoutingManaged,
+						},
+					},
+				},
+			},
+			&rav1.RouteAdvertisements{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "bgp-udn-layer3-no-overlay-snat-disabled-managed-ra",
+				},
+				Spec: rav1.RouteAdvertisementsSpec{
+					NetworkSelectors: apitypes.NetworkSelectors{
+						apitypes.NetworkSelector{
+							NetworkSelectionType: apitypes.ClusterUserDefinedNetworks,
+							ClusterUserDefinedNetworkSelector: &apitypes.ClusterUserDefinedNetworkSelector{
+								NetworkSelector: metav1.LabelSelector{
+									MatchLabels: map[string]string{"bgp-udn-layer3-no-overlay-snat-disabled-managed": ""},
+								},
+							},
+						},
+					},
+					NodeSelector:             metav1.LabelSelector{},
+					FRRConfigurationSelector: metav1.LabelSelector{},
+					Advertisements: []rav1.AdvertisementType{
+						rav1.PodNetwork,
+					},
+				},
+			},
+		),
+		ginkgo.Entry("layer3 no-overlay SNAT disabled unmanaged routing", ginkgo.Label("no-overlay"),
+			&udnv1.ClusterUserDefinedNetwork{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "bgp-udn-layer3-no-overlay-snat-disabled-unmanaged-",
+					Labels:       map[string]string{"bgp-udn-layer3-no-overlay-snat-disabled-unmanaged": ""},
+				},
+				Spec: udnv1.ClusterUserDefinedNetworkSpec{
+					Network: udnv1.NetworkSpec{
+						Topology: udnv1.NetworkTopologyLayer3,
+						Layer3: &udnv1.Layer3Config{
+							Role: "Primary",
+							Subnets: []udnv1.Layer3Subnet{{
+								CIDR:       "103.103.0.0/16",
+								HostSubnet: 24,
+							}, {
+								CIDR:       "2014:100:200::0/60",
+								HostSubnet: 64,
+							}},
+						},
+						Transport: udnv1.TransportOptionNoOverlay,
+						NoOverlay: &udnv1.NoOverlayConfig{
+							OutboundSNAT: udnv1.SNATDisabled,
+							Routing:      udnv1.RoutingUnmanaged,
+						},
+					},
+				},
+			},
+			&rav1.RouteAdvertisements{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "bgp-udn-layer3-no-overlay-snat-disabled-unmanaged-ra",
+				},
+				Spec: rav1.RouteAdvertisementsSpec{
+					NetworkSelectors: apitypes.NetworkSelectors{
+						apitypes.NetworkSelector{
+							NetworkSelectionType: apitypes.ClusterUserDefinedNetworks,
+							ClusterUserDefinedNetworkSelector: &apitypes.ClusterUserDefinedNetworkSelector{
+								NetworkSelector: metav1.LabelSelector{
+									MatchLabels: map[string]string{"bgp-udn-layer3-no-overlay-snat-disabled-unmanaged": ""},
 								},
 							},
 						},
@@ -1166,6 +1415,38 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 					}
 					return condition.Reason
 				}, 30*time.Second, time.Second).Should(gomega.Equal("Accepted"))
+
+				// Check CUDN TransportAccepted condition is True after RA is created
+				if cudnATemplate.Spec.Network.Transport != "" && cudnATemplate.Spec.Network.Transport != udnv1.TransportOption("Geneve") {
+					ginkgo.By("ensure CUDN TransportAccepted condition is True")
+					for _, cudnName := range []string{cudnA.Name, cudnB.Name} {
+						gomega.Eventually(func(g gomega.Gomega) {
+							cudnObj, err := f.DynamicClient.Resource(clusterUDNGVR).Get(context.Background(), cudnName, metav1.GetOptions{}, "status")
+							g.Expect(err).NotTo(gomega.HaveOccurred())
+							conditions, err := getConditions(cudnObj)
+							g.Expect(err).NotTo(gomega.HaveOccurred())
+							for _, condition := range conditions {
+								if condition.Type == "TransportAccepted" {
+									g.Expect(string(condition.Status)).To(gomega.Equal("True"))
+									g.Expect(condition.Message).To(gomega.Equal("Transport has been configured as 'no-overlay'."))
+									return
+								}
+							}
+							g.Expect(false).To(gomega.BeTrue(), "TransportAccepted condition not found in CUDN %s", cudnName)
+						}, 30*time.Second, time.Second).Should(gomega.Succeed())
+					}
+
+					// TODO: remove this step after debugging; saves CUDN YAML for inspection
+					ginkgo.By("saving CUDN resource YAML for inspection")
+					for _, cudnName := range []string{cudnA.Name, cudnB.Name} {
+						cudnYAML, err := e2ekubectl.RunKubectl("", "get", "clusteruserdefinednetwork", cudnName, "-o", "yaml")
+						if err == nil {
+							framework.Logf("CUDN %s YAML:\n%s", cudnName, cudnYAML)
+						} else {
+							framework.Logf("Failed to get CUDN %s YAML: %v", cudnName, err)
+						}
+					}
+				}
 
 				ginkgo.By("ensure routes from UDNs are learned by the external FRR router")
 				serverContainerIPs := getBGPServerContainerIPs(f)
@@ -1849,6 +2130,113 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 			},
 		},
 	),
+	// TODO: uncomment when managed routing is supported
+	ginkgo.PEntry("Layer3 no-overlay SNAT disabled managed routing", ginkgo.Label("no-overlay"),
+		&udnv1.ClusterUserDefinedNetwork{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "bgp-l3-noovl-mgd-net-a",
+				Labels: map[string]string{"bgp-l3-noovl-mgd-net-a": ""},
+			},
+			Spec: udnv1.ClusterUserDefinedNetworkSpec{
+				Network: udnv1.NetworkSpec{
+					Topology: udnv1.NetworkTopologyLayer3,
+					Layer3: &udnv1.Layer3Config{
+						Role: "Primary",
+						Subnets: []udnv1.Layer3Subnet{{
+							CIDR:       "102.102.0.0/16",
+							HostSubnet: 24,
+						}, {
+							CIDR:       "2013:100:200::0/60",
+							HostSubnet: 64,
+						}},
+					},
+					Transport: udnv1.TransportOptionNoOverlay,
+					NoOverlay: &udnv1.NoOverlayConfig{
+						OutboundSNAT: udnv1.SNATDisabled,
+						Routing:      udnv1.RoutingManaged,
+					},
+				},
+			},
+		}, &udnv1.ClusterUserDefinedNetwork{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "bgp-l3-noovl-mgd-net-b",
+				Labels: map[string]string{"bgp-l3-noovl-mgd-net-b": ""},
+			},
+			Spec: udnv1.ClusterUserDefinedNetworkSpec{
+				Network: udnv1.NetworkSpec{
+					Topology: udnv1.NetworkTopologyLayer3,
+					Layer3: &udnv1.Layer3Config{
+						Role: "Primary",
+						Subnets: []udnv1.Layer3Subnet{{
+							CIDR:       "103.103.0.0/16",
+							HostSubnet: 24,
+						}, {
+							CIDR:       "2014:100:200::0/60",
+							HostSubnet: 64,
+						}},
+					},
+					Transport: udnv1.TransportOptionNoOverlay,
+					NoOverlay: &udnv1.NoOverlayConfig{
+						OutboundSNAT: udnv1.SNATDisabled,
+						Routing:      udnv1.RoutingManaged,
+					},
+				},
+			},
+		},
+	),
+	ginkgo.Entry("Layer3 no-overlay SNAT disabled unmanaged routing", ginkgo.Label("no-overlay"),
+		&udnv1.ClusterUserDefinedNetwork{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "bgp-l3-noovl-unmgd-net-a",
+				Labels: map[string]string{"bgp-l3-noovl-unmgd-net-a": ""},
+			},
+			Spec: udnv1.ClusterUserDefinedNetworkSpec{
+				Network: udnv1.NetworkSpec{
+					Topology: udnv1.NetworkTopologyLayer3,
+					Layer3: &udnv1.Layer3Config{
+						Role: "Primary",
+						Subnets: []udnv1.Layer3Subnet{{
+							CIDR:       "102.102.0.0/16",
+							HostSubnet: 24,
+						}, {
+							CIDR:       "2013:100:200::0/60",
+							HostSubnet: 64,
+						}},
+					},
+					Transport: udnv1.TransportOptionNoOverlay,
+					NoOverlay: &udnv1.NoOverlayConfig{
+						OutboundSNAT: udnv1.SNATDisabled,
+						Routing:      udnv1.RoutingUnmanaged,
+					},
+				},
+			},
+		}, &udnv1.ClusterUserDefinedNetwork{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "bgp-l3-noovl-unmgd-net-b",
+				Labels: map[string]string{"bgp-l3-noovl-unmgd-net-b": ""},
+			},
+			Spec: udnv1.ClusterUserDefinedNetworkSpec{
+				Network: udnv1.NetworkSpec{
+					Topology: udnv1.NetworkTopologyLayer3,
+					Layer3: &udnv1.Layer3Config{
+						Role: "Primary",
+						Subnets: []udnv1.Layer3Subnet{{
+							CIDR:       "103.103.0.0/16",
+							HostSubnet: 24,
+						}, {
+							CIDR:       "2014:100:200::0/60",
+							HostSubnet: 64,
+						}},
+					},
+					Transport: udnv1.TransportOptionNoOverlay,
+					NoOverlay: &udnv1.NoOverlayConfig{
+						OutboundSNAT: udnv1.SNATDisabled,
+						Routing:      udnv1.RoutingUnmanaged,
+					},
+				},
+			},
+		},
+	),
 	ginkgo.Entry("Layer2",
 		&udnv1.ClusterUserDefinedNetwork{
 			ObjectMeta: metav1.ObjectMeta{
@@ -2223,10 +2611,74 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 			},
 		}
 	}
+	layer3NoOverlaySNATEnabledUnmanagedSpecGen := func() *udnv1.NetworkSpec {
+		return &udnv1.NetworkSpec{
+			Topology: udnv1.NetworkTopologyLayer3,
+			Layer3: &udnv1.Layer3Config{
+				Role:    udnv1.NetworkRolePrimary,
+				Subnets: randomL3CUDNSubnets(),
+			},
+			Transport: udnv1.TransportOptionNoOverlay,
+			NoOverlay: &udnv1.NoOverlayConfig{
+				OutboundSNAT: udnv1.SNATEnabled,
+				Routing:      udnv1.RoutingUnmanaged,
+			},
+		}
+	}
+	// TODO: uncomment when managed routing is supported
+	_ = func() *udnv1.NetworkSpec {
+		return &udnv1.NetworkSpec{
+			Topology: udnv1.NetworkTopologyLayer3,
+			Layer3: &udnv1.Layer3Config{
+				Role:    udnv1.NetworkRolePrimary,
+				Subnets: randomL3CUDNSubnets(),
+			},
+			Transport: udnv1.TransportOptionNoOverlay,
+			NoOverlay: &udnv1.NoOverlayConfig{
+				OutboundSNAT: udnv1.SNATEnabled,
+				Routing:      udnv1.RoutingManaged,
+			},
+		}
+	}
+	layer3NoOverlaySNATDisabledUnmanagedSpecGen := func() *udnv1.NetworkSpec {
+		return &udnv1.NetworkSpec{
+			Topology: udnv1.NetworkTopologyLayer3,
+			Layer3: &udnv1.Layer3Config{
+				Role:    udnv1.NetworkRolePrimary,
+				Subnets: randomL3CUDNSubnets(),
+			},
+			Transport: udnv1.TransportOptionNoOverlay,
+			NoOverlay: &udnv1.NoOverlayConfig{
+				OutboundSNAT: udnv1.SNATDisabled,
+				Routing:      udnv1.RoutingUnmanaged,
+			},
+		}
+	}
+	// TODO: uncomment when managed routing is supported
+	_ = func() *udnv1.NetworkSpec {
+		return &udnv1.NetworkSpec{
+			Topology: udnv1.NetworkTopologyLayer3,
+			Layer3: &udnv1.Layer3Config{
+				Role:    udnv1.NetworkRolePrimary,
+				Subnets: randomL3CUDNSubnets(),
+			},
+			Transport: udnv1.TransportOptionNoOverlay,
+			NoOverlay: &udnv1.NoOverlayConfig{
+				OutboundSNAT: udnv1.SNATDisabled,
+				Routing:      udnv1.RoutingManaged,
+			},
+		}
+	}
 
 	networksToTest := []ginkgo.TableEntry{
 		ginkgo.Entry("Layer 3 CUDN VRF-Lite", cudnAdvertisedVRFLite, layer3NetworkSpecGen),
 		ginkgo.Entry("Layer 2 CUDN VRF-Lite", cudnAdvertisedVRFLite, layer2NetworkSpecGen),
+		ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT enabled unmanaged routing", ginkgo.Label("no-overlay"), cudnAdvertisedVRFLite, layer3NoOverlaySNATEnabledUnmanagedSpecGen),
+		// TODO: uncomment when managed routing is supported
+		// ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT enabled managed routing", ginkgo.Label("no-overlay"), cudnAdvertisedVRFLite, layer3NoOverlaySNATEnabledManagedSpecGen),  //nolint:govet
+		ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT disabled unmanaged routing", ginkgo.Label("no-overlay"), cudnAdvertisedVRFLite, layer3NoOverlaySNATDisabledUnmanagedSpecGen),
+		// TODO: uncomment when managed routing is supported
+		// ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT disabled managed routing", ginkgo.Label("no-overlay"), cudnAdvertisedVRFLite, layer3NoOverlaySNATDisabledManagedSpecGen),  //nolint:govet
 		ginkgo.Entry("Layer 3 CUDN EVPN IP-VRF", feature.EVPN, cudnAdvertisedEVPN, layer3IPVRFNetworkSpecGen),
 		ginkgo.Entry("Layer 2 CUDN EVPN MAC-VRF", feature.EVPN, cudnAdvertisedEVPN, layer2MACVRFNetworkSpecGen),
 		ginkgo.Entry("Layer 2 CUDN EVPN MAC-VRF and IP-VRF", feature.EVPN, cudnAdvertisedEVPN, layer2MACVRFIPVRFNetworkSpecGen),
@@ -2236,6 +2688,7 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 		func(testedNetworkType networkType, networkSpecGen func() *udnv1.NetworkSpec) {
 			var testNamespace *corev1.Namespace
 			var testPod *corev1.Pod
+			var networkSpec *udnv1.NetworkSpec
 
 			getSameNode := func() string {
 				return testPod.Spec.NodeName
@@ -2254,7 +2707,7 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 			}
 
 			ginkgo.BeforeEach(func() {
-				networkSpec := networkSpecGen()
+				networkSpec = networkSpecGen()
 				switch {
 				case networkSpec.Layer3 != nil:
 					networkSpec.Layer3.Subnets = matchL3SubnetsByIPFamilies(ipFamilySet, networkSpec.Layer3.Subnets...)
@@ -2292,7 +2745,14 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 						if !ipFamilySet.Has(family) {
 							e2eskipper.Skipf("IP family %v not supported", family)
 						}
-						ginkgo.By("Ensuring a request from the pod can reach the external servers without being SNATed")
+						expectSNAT := networkSpec.NoOverlay != nil &&
+							networkSpec.NoOverlay.OutboundSNAT == udnv1.SNATEnabled
+
+						if expectSNAT {
+							ginkgo.By("Ensuring a request from the pod can reach the external servers (SNATed since OutboundSNAT is enabled)")
+						} else {
+							ginkgo.By("Ensuring a request from the pod can reach the external servers without being SNATed")
+						}
 						for _, externalServer := range externalServers {
 							bgpServerNetwork, err := infraprovider.Get().GetNetwork(externalServer)
 							gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -2315,8 +2775,26 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 							)
 							gomega.Expect(err).NotTo(gomega.HaveOccurred())
 							gomega.Expect(testPodIP).ToNot(gomega.BeEmpty())
-							framework.Logf("Sending request from pod to server %q is not SNATed", externalServer)
-							testPodToClientIPAndExpect(testPod, serverIP, testPodIP)
+							if expectSNAT {
+								framework.Logf("Sending request from pod to server %q is SNATed (OutboundSNAT enabled)", externalServer)
+								// When OutboundSNAT is enabled, pod-to-external traffic is masqueraded
+								// to the node IP. Verify the source is NOT the pod IP.
+								ip, err := e2epodoutput.RunHostCmdWithRetries(
+									testPod.Namespace,
+									testPod.Name,
+									fmt.Sprintf("curl --max-time %d -g -q -s http://%s/clientip", curlMaxTime, net.JoinHostPort(serverIP, netexecPortStr)),
+									polling,
+									timeout,
+								)
+								gomega.Expect(err).NotTo(gomega.HaveOccurred())
+								sourceIP, _, err := net.SplitHostPort(ip)
+								gomega.Expect(err).NotTo(gomega.HaveOccurred())
+								gomega.Expect(sourceIP).NotTo(gomega.Equal(testPodIP),
+									fmt.Sprintf("Expected SNAT for pod %s but traffic was not SNATed, output: %v", testPod.Name, ip))
+							} else {
+								framework.Logf("Sending request from pod to server %q is not SNATed", externalServer)
+								testPodToClientIPAndExpect(testPod, serverIP, testPodIP)
+							}
 						}
 					},
 					ginkgo.Entry("When the network is IPv4", utilnet.IPv4),
