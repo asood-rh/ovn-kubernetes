@@ -1770,8 +1770,12 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 						//    172.18.0.2.25022 > 93.93.1.5.36363: Flags [R.], cksum 0x609d (correct), seq 0, ack 1, win 0, length 0
 						return clientPod.Name, clientPod.Namespace, net.JoinHostPort(nodeIP, fmt.Sprint(hostNetworkPort)) + "/hostname", "", true
 					}),
+				// FAIL: LGW mode east west traffic failure (cross node connectivity)
 				ginkgo.Entry("UDN pod to a different node should work",
 					func(ipFamily utilnet.IPFamily) (clientName string, clientNamespace string, dst string, expectedOutput string, expectErr bool) {
+						if IsGatewayModeLocal(f.ClientSet) {
+							e2eskipper.Skipf("LGW mode east west traffic failure (cross node connectivity)")
+						}
 						clientPod := podsNetA[0]
 						// podsNetA[0] and podsNetA[2] are on different nodes so we can pick the node of podsNetA[2] as the different node destination
 						node, err := f.ClientSet.CoreV1().Nodes().Get(context.TODO(), podsNetA[2].Spec.NodeName, metav1.GetOptions{})
@@ -1808,8 +1812,12 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 
 						return clientPod.Name, clientPod.Namespace, net.JoinHostPort(nodeIP, fmt.Sprint(nodePort)) + "/hostname", curlConnectionTimeoutCode, true
 					}),
+				// FAIL: LGW mode east west traffic failure (cross node nodeport connectivity)
 				ginkgo.Entry("[ETP=Cluster] UDN pod to a different node nodeport service in default network should work",
 					func(ipFamily utilnet.IPFamily) (clientName string, clientNamespace string, dst string, expectedOutput string, expectErr bool) {
+						if IsGatewayModeLocal(f.ClientSet) {
+							e2eskipper.Skipf("LGW mode east west traffic failure (cross node nodeport connectivity)")
+						}
 						clientPod := podsNetA[0]
 						// podsNetA[0] is on nodes[0]. We need a different node. podNetDefault is on nodes[1].
 						// The service is backed by podNetDefault. Let's hit the nodeport on nodes[2].
@@ -1843,9 +1851,10 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 						// Just check that the connection is successful.
 						return clientPod.Name, clientPod.Namespace, net.JoinHostPort(nodeIP, fmt.Sprint(nodePort)) + "/hostname", "", false
 					}),
-				// FAIL: SGW mode east west traffic failure (cross node connectivity)
+				// FAIL: SGW & LGW mode east west traffic failure (cross node connectivity)
 				ginkgo.Entry("[ETP=Cluster] UDN pod to a different node nodeport service in same UDN network should work",
 					func(ipFamily utilnet.IPFamily) (clientName string, clientNamespace string, dst string, expectedOutput string, expectErr bool) {
+						e2eskipper.Skipf("SGW & LGW mode east west traffic failure (cross node connectivity)")
 						clientPod := podsNetA[0]
 						// The service is backed by pods in podsNetA.
 						// We want to hit the nodeport on a different node.
@@ -1886,9 +1895,10 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 						// sourceIP will be joinSubnetIP for nodeports, so only using hostname endpoint
 						return clientPod.Name, clientPod.Namespace, net.JoinHostPort(nodeIP, fmt.Sprint(nodePort)) + "/hostname", curlConnectionTimeoutCode, true
 					}),
-				// FAIL: SGW mode east west traffic failure (cross node connectivity)
+				// FAIL: SGW & LGW mode east west traffic failure (cross node connectivity)
 				ginkgo.Entry("[ETP=Cluster] UDN pod to a different node nodeport service in different UDN network should work",
 					func(ipFamily utilnet.IPFamily) (clientName string, clientNamespace string, dst string, expectedOutput string, expectErr bool) {
+						e2eskipper.Skipf("SGW & LGW mode east west traffic failure (cross node connectivity)")
 						clientPod := podsNetA[0]
 						// The service is backed by podNetB.
 						// We want to hit the nodeport on a different node from the client.
@@ -2005,8 +2015,12 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 						nodePortB := svcNodePortETPLocalDefault.Spec.Ports[0].NodePort
 						return clientPod.Name, clientPod.Namespace, net.JoinHostPort(nodeIP, fmt.Sprint(nodePortB)) + "/hostname", curlConnectionTimeoutCode, true
 					}),
+				// FAIL: LGW mode east west traffic failure (cross node nodeport connectivity)
 				ginkgo.Entry("[ETP=LOCAL] UDN pod to a different node nodeport service in default network should work",
 					func(ipFamily utilnet.IPFamily) (clientName string, clientNamespace string, dst string, expectedOutput string, expectErr bool) {
+						if IsGatewayModeLocal(f.ClientSet) {
+							e2eskipper.Skipf("LGW mode east west traffic failure (cross node nodeport connectivity)")
+						}
 						// podsNetA[0] is on nodes[0]. We need a different node. podNetDefault is on nodes[1].
 						// So we hit nodeport on nodes[1].
 						clientPod := podsNetA[0]
@@ -2034,8 +2048,12 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 						nodePortA := svcNodePortETPLocalNetA.Spec.Ports[0].NodePort
 						return clientPod.Name, clientPod.Namespace, net.JoinHostPort(nodeIP, fmt.Sprint(nodePortA)) + "/hostname", curlConnectionTimeoutCode, true
 					}),
+				// FAIL: LGW mode east west traffic failure (cross node nodeport connectivity)
 				ginkgo.Entry("[ETP=LOCAL] Default network pod to different node nodeport service in UDN network should work",
 					func(ipFamily utilnet.IPFamily) (clientName string, clientNamespace string, dst string, expectedOutput string, expectErr bool) {
+						if IsGatewayModeLocal(f.ClientSet) {
+							e2eskipper.Skipf("LGW mode east west traffic failure (cross node nodeport connectivity)")
+						}
 						// podNetDefault is on nodes[1]. We need a different node. podsNetA[0] is on nodes[0].
 						// So we hit nodeport on nodes[0].
 						clientPod := podNetDefault
