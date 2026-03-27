@@ -760,15 +760,6 @@ var _ = ginkgo.Describe("BGP: Pod to external server when CUDN network is advert
 					}
 					g.Expect(false).To(gomega.BeTrue(), "TransportAccepted condition not found in CUDN %s", cUDN.Name)
 				}, 30*time.Second, time.Second).Should(gomega.Succeed())
-
-				// TODO: remove this step after debugging; saves CUDN YAML for inspection
-				ginkgo.By("saving CUDN resource YAML for inspection")
-				cudnYAML, err := e2ekubectl.RunKubectl("", "get", "clusteruserdefinednetwork", cUDN.Name, "-o", "yaml")
-				if err == nil {
-					framework.Logf("CUDN %s YAML:\n%s", cUDN.Name, cudnYAML)
-				} else {
-					framework.Logf("Failed to get CUDN %s YAML: %v", cUDN.Name, err)
-				}
 			}
 
 			gomega.Expect(len(serverContainerIPs)).To(gomega.BeNumerically(">", 0))
@@ -938,7 +929,7 @@ var _ = ginkgo.Describe("BGP: Pod to external server when CUDN network is advert
 			},
 		),
 		// TODO: uncomment when managed routing is supported
-		ginkgo.PEntry("layer3 no-overlay SNAT enabled managed routing", ginkgo.Label("no-overlay"),
+		ginkgo.PEntry("layer3 no-overlay SNAT enabled managed routing", feature.NoOverlay,
 			&udnv1.ClusterUserDefinedNetwork{
 				ObjectMeta: metav1.ObjectMeta{
 					GenerateName: "bgp-udn-layer3-no-overlay-snat-enabled-managed-",
@@ -988,7 +979,7 @@ var _ = ginkgo.Describe("BGP: Pod to external server when CUDN network is advert
 				},
 			},
 		),
-		ginkgo.Entry("layer3 no-overlay SNAT enabled unmanaged routing", ginkgo.Label("no-overlay"),
+		ginkgo.Entry("layer3 no-overlay SNAT enabled unmanaged routing", feature.NoOverlay,
 			&udnv1.ClusterUserDefinedNetwork{
 				ObjectMeta: metav1.ObjectMeta{
 					GenerateName: "bgp-udn-layer3-no-overlay-snat-enabled-unmanaged-",
@@ -1039,7 +1030,7 @@ var _ = ginkgo.Describe("BGP: Pod to external server when CUDN network is advert
 			},
 		),
 		// TODO: uncomment when managed routing is supported
-		ginkgo.PEntry("layer3 no-overlay SNAT disabled managed routing", ginkgo.Label("no-overlay"),
+		ginkgo.PEntry("layer3 no-overlay SNAT disabled managed routing", feature.NoOverlay,
 			&udnv1.ClusterUserDefinedNetwork{
 				ObjectMeta: metav1.ObjectMeta{
 					GenerateName: "bgp-udn-layer3-no-overlay-snat-disabled-managed-",
@@ -1089,7 +1080,7 @@ var _ = ginkgo.Describe("BGP: Pod to external server when CUDN network is advert
 				},
 			},
 		),
-		ginkgo.Entry("layer3 no-overlay SNAT disabled unmanaged routing", ginkgo.Label("no-overlay"),
+		ginkgo.Entry("layer3 no-overlay SNAT disabled unmanaged routing", feature.NoOverlay,
 			&udnv1.ClusterUserDefinedNetwork{
 				ObjectMeta: metav1.ObjectMeta{
 					GenerateName: "bgp-udn-layer3-no-overlay-snat-disabled-unmanaged-",
@@ -1434,17 +1425,6 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 							}
 							g.Expect(false).To(gomega.BeTrue(), "TransportAccepted condition not found in CUDN %s", cudnName)
 						}, 30*time.Second, time.Second).Should(gomega.Succeed())
-					}
-
-					// TODO: remove this step after debugging; saves CUDN YAML for inspection
-					ginkgo.By("saving CUDN resource YAML for inspection")
-					for _, cudnName := range []string{cudnA.Name, cudnB.Name} {
-						cudnYAML, err := e2ekubectl.RunKubectl("", "get", "clusteruserdefinednetwork", cudnName, "-o", "yaml")
-						if err == nil {
-							framework.Logf("CUDN %s YAML:\n%s", cudnName, cudnYAML)
-						} else {
-							framework.Logf("Failed to get CUDN %s YAML: %v", cudnName, err)
-						}
 					}
 				}
 
@@ -1863,6 +1843,7 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 						// Just check that the connection is successful.
 						return clientPod.Name, clientPod.Namespace, net.JoinHostPort(nodeIP, fmt.Sprint(nodePort)) + "/hostname", "", false
 					}),
+				// FAIL: SGW mode east west traffic failure (cross node connectivity)
 				ginkgo.Entry("[ETP=Cluster] UDN pod to a different node nodeport service in same UDN network should work",
 					func(ipFamily utilnet.IPFamily) (clientName string, clientNamespace string, dst string, expectedOutput string, expectErr bool) {
 						clientPod := podsNetA[0]
@@ -1905,6 +1886,7 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 						// sourceIP will be joinSubnetIP for nodeports, so only using hostname endpoint
 						return clientPod.Name, clientPod.Namespace, net.JoinHostPort(nodeIP, fmt.Sprint(nodePort)) + "/hostname", curlConnectionTimeoutCode, true
 					}),
+				// FAIL: SGW mode east west traffic failure (cross node connectivity)
 				ginkgo.Entry("[ETP=Cluster] UDN pod to a different node nodeport service in different UDN network should work",
 					func(ipFamily utilnet.IPFamily) (clientName string, clientNamespace string, dst string, expectedOutput string, expectErr bool) {
 						clientPod := podsNetA[0]
@@ -2131,7 +2113,7 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 		},
 	),
 	// TODO: uncomment when managed routing is supported
-	ginkgo.PEntry("Layer3 no-overlay SNAT disabled managed routing", ginkgo.Label("no-overlay"),
+	ginkgo.PEntry("Layer3 no-overlay SNAT disabled managed routing", feature.NoOverlay,
 		&udnv1.ClusterUserDefinedNetwork{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "bgp-l3-noovl-mgd-net-a",
@@ -2184,7 +2166,7 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 			},
 		},
 	),
-	ginkgo.Entry("Layer3 no-overlay SNAT disabled unmanaged routing", ginkgo.Label("no-overlay"),
+	ginkgo.Entry("Layer3 no-overlay SNAT disabled unmanaged routing", feature.NoOverlay,
 		&udnv1.ClusterUserDefinedNetwork{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "bgp-l3-noovl-unmgd-net-a",
@@ -2673,12 +2655,12 @@ var _ = ginkgo.Describe("BGP: For BGP configured networks", feature.RouteAdverti
 	networksToTest := []ginkgo.TableEntry{
 		ginkgo.Entry("Layer 3 CUDN VRF-Lite", cudnAdvertisedVRFLite, layer3NetworkSpecGen),
 		ginkgo.Entry("Layer 2 CUDN VRF-Lite", cudnAdvertisedVRFLite, layer2NetworkSpecGen),
-		ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT enabled unmanaged routing", ginkgo.Label("no-overlay"), cudnAdvertisedVRFLite, layer3NoOverlaySNATEnabledUnmanagedSpecGen),
+		ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT enabled unmanaged routing", feature.NoOverlay, cudnAdvertisedVRFLite, layer3NoOverlaySNATEnabledUnmanagedSpecGen),
 		// TODO: uncomment when managed routing is supported
-		// ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT enabled managed routing", ginkgo.Label("no-overlay"), cudnAdvertisedVRFLite, layer3NoOverlaySNATEnabledManagedSpecGen),  //nolint:govet
-		ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT disabled unmanaged routing", ginkgo.Label("no-overlay"), cudnAdvertisedVRFLite, layer3NoOverlaySNATDisabledUnmanagedSpecGen),
+		// ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT enabled managed routing", feature.NoOverlay, cudnAdvertisedVRFLite, layer3NoOverlaySNATEnabledManagedSpecGen),  //nolint:govet
+		ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT disabled unmanaged routing", feature.NoOverlay, cudnAdvertisedVRFLite, layer3NoOverlaySNATDisabledUnmanagedSpecGen),
 		// TODO: uncomment when managed routing is supported
-		// ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT disabled managed routing", ginkgo.Label("no-overlay"), cudnAdvertisedVRFLite, layer3NoOverlaySNATDisabledManagedSpecGen),  //nolint:govet
+		// ginkgo.Entry("Layer 3 CUDN VRF-Lite no-overlay SNAT disabled managed routing", feature.NoOverlay, cudnAdvertisedVRFLite, layer3NoOverlaySNATDisabledManagedSpecGen),  //nolint:govet
 		ginkgo.Entry("Layer 3 CUDN EVPN IP-VRF", feature.EVPN, cudnAdvertisedEVPN, layer3IPVRFNetworkSpecGen),
 		ginkgo.Entry("Layer 2 CUDN EVPN MAC-VRF", feature.EVPN, cudnAdvertisedEVPN, layer2MACVRFNetworkSpecGen),
 		ginkgo.Entry("Layer 2 CUDN EVPN MAC-VRF and IP-VRF", feature.EVPN, cudnAdvertisedEVPN, layer2MACVRFIPVRFNetworkSpecGen),
@@ -3249,7 +3231,7 @@ const frrImage = "quay.io/frrouting/frr:10.4.2"
 // neighbors in the network's VRF configured to advertised the provided
 // networks. Returns a temporary directory where the configuration is generated.
 func generateFRRConfiguration(neighborIPs, advertiseNetworks []string) (directory string, err error) {
-	// parse configuration templates
+	// parse configuration templatesex
 	var templates *template.Template
 	templates, err = template.ParseFS(ratestdata, filepath.Join(tmplDir, "frr", "*.tmpl"))
 	if err != nil {
