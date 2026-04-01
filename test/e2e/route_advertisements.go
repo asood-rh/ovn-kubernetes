@@ -955,10 +955,10 @@ var _ = ginkgo.DescribeTableSubtree("BGP: isolation between advertised networks"
 			cudnATemplate.Spec.Network.NoOverlay.Routing == udnv1.RoutingManaged
 
 		ginkgo.BeforeEach(func() {
-			if isManagedRouting && !isNoOverlayManagedRoutingEnabled(f) {
+			if isManagedRouting && !isManagedBGPEnabled(f) {
 				e2eskipper.Skipf("managed routing is not enabled on the cluster")
 			}
-			if !isManagedRouting && isNoOverlayManagedRoutingEnabled(f) {
+			if !isManagedRouting && isManagedBGPEnabled(f) {
 				e2eskipper.Skipf("overlay transport tests are not supported on managed routing clusters")
 			}
 		})
@@ -3356,15 +3356,16 @@ func isNoOverlayOutboundSNATEnabled(f *framework.Framework) bool {
 	return re.MatchString(conf)
 }
 
-// isNoOverlayManagedRoutingEnabled reads the ovnkube-config configmap to determine
-// whether managed routing is enabled in no-overlay mode.
-func isNoOverlayManagedRoutingEnabled(f *framework.Framework) bool {
+// isManagedBGPEnabled reads the ovnkube-config configmap to determine
+// whether the managed BGP controller is enabled. The controller is enabled
+// when the [bgp-managed] section has a non-empty frr-namespace configured.
+func isManagedBGPEnabled(f *framework.Framework) bool {
 	cm, err := f.ClientSet.CoreV1().ConfigMaps(deploymentconfig.Get().OVNKubernetesNamespace()).Get(
 		context.TODO(), "ovnkube-config", metav1.GetOptions{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "must get ovnkube-config configmap")
 	conf, ok := cm.Data["ovnkube.conf"]
 	gomega.Expect(ok).To(gomega.BeTrue(), "ovnkube.conf key must be present in ovnkube-config configmap")
-	re := regexp.MustCompile(`(?m)^\s*routing\s*=\s*managed\s*$`)
+	re := regexp.MustCompile(`(?m)^\s*frr-namespace\s*=\s*\S+`)
 	return re.MatchString(conf)
 }
 
